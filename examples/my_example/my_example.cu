@@ -137,12 +137,12 @@ compare if the output from CUTLASS kernel is same as the reference implicit GEMM
 #include <cutlass/util/host_tensor.h>
 
 //#include "cutlass/util/command_line.h"
-//#include "cutlass/util/host_tensor.h"
-//#include "cutlass/util/tensor_view_io.h"
-//#include "cutlass/util/reference/device/gemm.h"
-//#include "cutlass/util/reference/host/tensor_compare.h"
-//#include "cutlass/util/reference/host/tensor_copy.h"
-//#include "cutlass/util/reference/host/tensor_fill.h"
+#include "cutlass/util/host_tensor.h"
+#include "cutlass/util/tensor_view_io.h"
+#include "cutlass/util/reference/device/gemm.h"
+#include "cutlass/util/reference/host/tensor_compare.h"
+#include "cutlass/util/reference/host/tensor_copy.h"
+#include "cutlass/util/reference/host/tensor_fill.h"
 //#include "cutlass/util/reference/host/convolution.h"
 //#include "cutlass/util/tensor_view_io.h"
 
@@ -156,9 +156,9 @@ using ElementInputA = cutlass::half_t;             // Data type of elements in i
 using ElementInputB = cutlass::half_t;             // Data type of elements in input tensor
 using ElementOutput = cutlass::half_t;             // Data type of elements in output tensor
 
-using LayoutInputA = cutlass::layout::TensorNCHW;
-using LayoutInputB = cutlass::layout::TensorNCHW;
-using LayoutOutput = cutlass::layout::TensorNCHW;
+using LayoutInputA = cutlass::layout::TensorNHWC;
+using LayoutInputB = cutlass::layout::TensorNHWC;
+using LayoutOutput = cutlass::layout::TensorNHWC;
 
 // This code section describes whether you want to use tensor cores or regular SIMT cores on GPU SM
 //using MMAOp = cutlass::arch::OpClassTensorOp;
@@ -277,7 +277,7 @@ struct Options {
     iterations(20),
     save_workspace(false),
     alpha(1),
-    beta(0),
+    beta(1),
     benchmark(false) { }
 
   // Verify the problem size is compatible with the CUTLASS Convolution implementation.
@@ -341,7 +341,7 @@ struct Options {
 };
 
 
-torch::Tensor forward_fp16(torch::Tensor input, torch::Tensor weight) {
+torch::Tensor forward_fp16(torch::Tensor input, torch::Tensor weight, torch::Tensor bias) {
     //CHECK_INPUT(input);
     //CHECK_INPUT(weight);
 
@@ -349,11 +349,17 @@ torch::Tensor forward_fp16(torch::Tensor input, torch::Tensor weight) {
     Options options = Options();
 
     options.update({input.size(0), input.size(1), input.size(2), input.size(3)},
-                   {weight.size(0), weight.size(1), weight.size(2), weight.size(3)});
+                  {weight.size(0), weight.size(1), weight.size(2), weight.size(3)});
+    if (!options.valid()) {
+        throw std::runtime_error("Option is not valid");
+    }
     const auto out = options.output_size();
 
-    torch::Device device = torch::kCUDA;
-    torch::Tensor output = torch::zeros({out.n(), out.c(), out.h(), out.w()}).to(device).to(torch::kFloat16);
+
+   torch::Device device = torch::kCUDA;
+   torch::Tensor output = bias.repeat({out.(), out.h(), out.w(), 1}).to(device).to(torch::kFloat);
+   //torch::Tensor output = torch::zeros({out.n(), out.h(), out.w(), out.c()}).to(device).to(torch::kFloat16);
+   std::cout << "THe output shape is " << output.sizes() << ", with stride: " << output.strides() << std::endl;
     cutlass::TensorRef<ElementInputA, LayoutInputA> d_src(
             (ElementInputA*)input.data_ptr(),
             LayoutInputA::packed(options.input_size));
@@ -376,7 +382,7 @@ torch::Tensor forward_fp16(torch::Tensor input, torch::Tensor weight) {
     typename ImplicitGemm::Arguments arguments{
             {options.input_size, options.filter_size, options.padding,
              options.conv_stride, options.dilation, options.output_size(), mode,
-             split_k_slices, options.filter_size.n()},
+             split_k_slices},
             d_src,     // tensor_src.device_ref(),
             d_filter,  // tensor_filter.device_ref(),
             d_dst,
@@ -393,6 +399,7 @@ torch::Tensor forward_fp16(torch::Tensor input, torch::Tensor weight) {
 
     // Allocate workspace memory
     cutlass::device_memory::allocation<uint8_t> workspace(workspace_size);
+    CUTLASS_CHECK(conv_op.can_implement(arguments));
 
     CUTLASS_CHECK(conv_op.initialize(arguments, workspace.get()));
 
@@ -401,16 +408,40 @@ torch::Tensor forward_fp16(torch::Tensor input, torch::Tensor weight) {
     //
 
     CUTLASS_CHECK(conv_op());
-    std::cout << output << std::endl;
+    //std::cout << output  << std::endl;
 
     return output;
 }
 
 int main() {
     torch::Device device = torch::kCUDA;
-    torch::Tensor a = torch::rand({1, 32, 224, 224}).to(device).to(torch::kFloat16);
-    torch::Tensor b = torch::rand({256, 3, 5, 5}).to(device).to(torch::kFloat16);
-    const torch::Tensor res = forward_fp16(a, b);
-    torch::save(res, "/tmp/out.pt");
+    torch::Tensor a = torch::rand({1, 32, 224, 224});
+    torch::save(a, "/tmp/inp.pt");
+    a = a.to(device).to(torch::kFloat16);
+    torch::nn::ConvOptions<2> options(int64_t(32), int64_t(256), {3,3});
+    options.bias(true);
+    options.padding(1);
+    torch::nn::Conv2d conv{options};
+    torch::save(conv, "/tmp/conv.pt");
+    conv->to(torch::kCUDA);
+    conv->to(torch::kFloat16);
+    torch::Tensor y = conv(a);
+    torch::save(y, "/tmp/orig.pt");
+    a = a.permute({0, 2, 3, 1}).contiguous();
+    std::cout << "a sizes and strides: " << a.sizes() << "; " << a.strides() << std::endl;
+    torch::Tensor b = conv->parameters()[0];
+    b = b.permute({0, 2, 3, 1}).contiguous();
+    torch::Tensor bias = conv->parameters()[1];
+    std::cout << "b sizes and strides: " << b.sizes() << "; " << b.strides() << std::endl;
+    std::cout << "bias sizes and strides: " << bias.sizes() << "; " << bias.strides() << std::endl;
+    torch::Tensor y_cutlass = forward_fp16(a, b, bias);
+    std::cout << "output sizes and strides: " << y_cutlass.sizes() << "; " << y_cutlass.strides() << std::endl;
+    y_cutlass = y_cutlass.permute({0, 3, 1, 2}).contiguous();
+    std::cout << "output sizes and strides: " << y_cutlass.sizes() << "; " << y_cutlass.strides() << std::endl;
+
+    torch::Tensor diff = torch::mean(torch::pow( y - y_cutlass, 2));
+    torch::Tensor ratio = diff / torch::mean(torch::pow(y, 2));
+    std::cout << "The differnce is: " << ratio << std::endl;
+    torch::save(y_cutlass, "/tmp/cutlass.pt");
 }
 
