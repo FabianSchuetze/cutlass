@@ -357,7 +357,7 @@ torch::Tensor forward_fp16(torch::Tensor input, torch::Tensor weight, torch::Ten
 
 
    torch::Device device = torch::kCUDA;
-   torch::Tensor output = bias.repeat({out.(), out.h(), out.w(), 1}).to(device).to(torch::kFloat);
+   torch::Tensor output = bias.repeat({out.n(), out.h(), out.w(), 1}).to(device).to(torch::kFloat16);
    //torch::Tensor output = torch::zeros({out.n(), out.h(), out.w(), out.c()}).to(device).to(torch::kFloat16);
    std::cout << "THe output shape is " << output.sizes() << ", with stride: " << output.strides() << std::endl;
     cutlass::TensorRef<ElementInputA, LayoutInputA> d_src(
