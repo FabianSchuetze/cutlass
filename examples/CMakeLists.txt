@@ -141,7 +141,7 @@ foreach(EXAMPLE
   #06_splitK_gemm
   #07_volta_tensorop_gemm
   #08_turing_tensorop_gemm
-  #09_turing_tensorop_conv2dfprop
+  09_turing_tensorop_conv2dfprop
   #10_planar_complex
   #11_planar_complex_array
   #12_gemm_bias_relu
@@ -184,6 +184,7 @@ foreach(EXAMPLE
   #50_hopper_gemm_with_epilogue_swizzle
   #51_hopper_gett
   my_example
+  my_example_int8
   )
 
   add_subdirectory(${EXAMPLE})
